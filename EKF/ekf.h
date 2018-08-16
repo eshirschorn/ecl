@@ -482,6 +482,10 @@ private:
 	// fuse the yaw angle obtained from a dual antenna GPS unit
 	void fuseGpsAntYaw();
 
+	// reset the quaternions states using the yaw angle obtained from a dual antenna GPS unit
+	// return true if the reset was successful
+	bool resetGpsAntYaw();
+
 	// fuse magnetometer declination measurement
 	void fuseDeclination();
 

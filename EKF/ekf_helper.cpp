@@ -1875,3 +1875,139 @@ void Ekf::fuseGpsAntYaw()
 
 	}
 }
+
+bool Ekf::resetGpsAntYaw()
+{
+	if (isfinite(_gps_sample_delayed.yaw)) {
+
+		// define the predicted antenna array vector, rotate into earth frame
+		// and calculate predicted antenna yaw angle
+		Vector3f ant_vec_bf = {cosf(_gps_yaw_offset), sinf(_gps_yaw_offset), 0.0f};
+		Vector3f ant_vec_ef = _R_to_earth * ant_vec_bf;
+		float predicted_yaw =  atan2f(ant_vec_ef(1),ant_vec_ef(0));
+
+		// get measurement and correct for antenna array yaw offset
+		float measured_yaw = _gps_sample_delayed.yaw + _gps_yaw_offset;
+
+		// caclulate the amount the yaw needs to be rotated by
+		float yaw_delta = wrap_pi(measured_yaw - predicted_yaw);
+
+		// save a copy of the quaternion state for later use in calculating the amount of reset change
+		Quatf quat_before_reset = _state.quat_nominal;
+		Quatf quat_after_reset = _state.quat_nominal;
+
+		// obtain the yaw angle using the best conditioned from either a Tait-Bryan 321 or 312 sequence
+		// to avoid gimbal lock
+		if (fabsf(_R_to_earth(2, 0)) < fabsf(_R_to_earth(2, 1))) {
+			// get the roll, pitch, yaw estimates from the quaternion states using a 321 Tait-Bryan rotation sequence
+			Quatf q_init(_state.quat_nominal);
+			Eulerf euler_init(q_init);
+
+			// correct the yaw angle
+			euler_init(2) += yaw_delta;
+			euler_init(2) = wrap_pi(euler_init(2));
+
+			// update the quaternions
+			quat_after_reset = Quatf(euler_init);
+
+		} else {
+			// Calculate the 312 Tait-Bryan sequence euler angles that rotate from earth to body frame
+			// PX4 math library does not support this so are using equations from
+			// http://www.atacolorado.com/eulersequences.doc
+			Vector3f euler312;
+			euler312(0) = atan2f(-_R_to_earth(0, 1), _R_to_earth(1, 1));  // first rotation (yaw)
+			euler312(1) = asinf(_R_to_earth(2, 1)); // second rotation (roll)
+			euler312(2) = atan2f(-_R_to_earth(2, 0), _R_to_earth(2, 2));  // third rotation (pitch)
+
+			// correct the yaw angle
+			euler312(0) += yaw_delta;
+			euler312(0) = wrap_pi(euler312(0));
+
+			// Calculate the body to earth frame rotation matrix from the corrected euler angles
+			float c2 = cosf(euler312(2));
+			float s2 = sinf(euler312(2));
+			float s1 = sinf(euler312(1));
+			float c1 = cosf(euler312(1));
+			float s0 = sinf(euler312(0));
+			float c0 = cosf(euler312(0));
+
+			Dcmf R_to_earth;
+			R_to_earth(0, 0) = c0 * c2 - s0 * s1 * s2;
+			R_to_earth(1, 1) = c0 * c1;
+			R_to_earth(2, 2) = c2 * c1;
+			R_to_earth(0, 1) = -c1 * s0;
+			R_to_earth(0, 2) = s2 * c0 + c2 * s1 * s0;
+			R_to_earth(1, 0) = c2 * s0 + s2 * s1 * c0;
+			R_to_earth(1, 2) = s0 * s2 - s1 * c0 * c2;
+			R_to_earth(2, 0) = -s2 * c1;
+			R_to_earth(2, 1) = s1;
+
+			// update the quaternions
+			quat_after_reset = Quatf(R_to_earth);
+		}
+
+		// calculate the amount that the quaternion has changed by
+		Quatf q_error =  quat_before_reset.inversed() * _state.quat_nominal;
+		q_error.normalize();
+
+		// convert the quaternion delta to a delta angle
+		Vector3f delta_ang_error;
+		float scalar;
+
+		if (q_error(0) >= 0.0f) {
+			scalar = -2.0f;
+
+		} else {
+			scalar = 2.0f;
+		}
+
+		delta_ang_error(0) = scalar * q_error(1);
+		delta_ang_error(1) = scalar * q_error(2);
+		delta_ang_error(2) = scalar * q_error(3);
+
+		// calculate the variance for the rotation estimate expressed as a rotation vector
+		// this will be used later to reset the quaternion state covariances
+		Vector3f angle_err_var_vec = calcRotVecVariances();
+
+		// update the quaternion state estimates and corresponding covariances only if the change in angle has been large or the yaw is not yet aligned
+		if (delta_ang_error.norm() > math::radians(15.0f) || !_control_status.flags.yaw_align) {
+			// update quaternion states
+			_state.quat_nominal = quat_after_reset;
+
+			// record the state change
+			_state_reset_status.quat_change = q_error;
+
+			// update transformation matrix from body to world frame using the current estimate
+			_R_to_earth = quat_to_invrotmat(_state.quat_nominal);
+
+			// reset the rotation from the EV to EKF frame of reference if it is being used
+			if ((_params.fusion_mode & MASK_ROTATE_EV) && (_params.fusion_mode & MASK_USE_EVPOS)) {
+				resetExtVisRotMat();
+			}
+
+			// update the yaw angle variance using the variance of the measurement
+			angle_err_var_vec(2) = sq(fmaxf(_params.mag_heading_noise, 1.0e-2f));
+
+			// reset the quaternion covariances using the rotation vector variances
+			initialiseQuatCovariances(angle_err_var_vec);
+
+			// add the reset amount to the output observer buffered data
+			for (uint8_t i = 0; i < _output_buffer.get_length(); i++) {
+				// Note q1 *= q2 is equivalent to q1 = q2 * q1
+				_output_buffer[i].quat_nominal *= _state_reset_status.quat_change;
+			}
+
+			// apply the change in attitude quaternion to our newest quaternion estimate
+			// which was already taken out from the output buffer
+			_output_new.quat_nominal = _state_reset_status.quat_change * _output_new.quat_nominal;
+
+			// capture the reset event
+			_state_reset_status.quat_counter++;
+
+		}
+
+		return true;
+	}
+
+	return false;
+}

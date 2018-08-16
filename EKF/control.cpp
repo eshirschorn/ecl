@@ -512,109 +512,26 @@ void Ekf::controlGpsFusion()
 	if (_gps_data_ready) {
 
 		// GPS yaw aiding selection logic
-		if ((_params.fusion_mode & MASK_USE_GPSYAW) && !_control_status.flags.gps_yaw && _control_status.flags.tilt_align) {
-			// don't start using GPS data unless data is arriving frequently
-			if (_time_last_imu - _time_last_gps < 2 * GPS_MAX_INTERVAL) {
-				// reset the yaw angle to the value from the observaton quaternion
+		if ((_params.fusion_mode & MASK_USE_GPSYAW)
+				&& isfinite(_gps_sample_delayed.yaw)
+				&& _control_status.flags.tilt_align
+				&& (!_control_status.flags.gps_yaw || !_control_status.flags.yaw_align)
+				&& (_time_last_imu - _time_last_gps < 2 * GPS_MAX_INTERVAL)) {
 
-				// get initial yaw from the observation quaternion
-				const gpsSample &gps_newest = _gps_buffer.get_newest();
-				if (isfinite(gps_newest.yaw)) {
+			if (resetGpsAntYaw()) {
+				// flag the yaw as aligned
+				_control_status.flags.yaw_align = true;
 
-					// define the predicted antenna array vector, rotate into earth frame
-					// and calculate predicted antenna yaw angle
-					Vector3f ant_vec_bf = {cosf(_gps_yaw_offset), sinf(_gps_yaw_offset), 0.0f};
-					Vector3f ant_vec_ef = _R_to_earth * ant_vec_bf;
-					float predicted_yaw =  atan2f(ant_vec_ef(1),ant_vec_ef(0));
+				// turn on fusion of external vision yaw measurements and disable all other yaw fusion
+				_control_status.flags.gps_yaw = true;
+				_control_status.flags.ev_yaw = false;
+				_control_status.flags.mag_hdg = false;
+				_control_status.flags.mag_3D = false;
+				_control_status.flags.mag_dec = false;
 
-					// get measurement and correct for antenna array yaw offset
-					float measured_yaw = _gps_sample_delayed.yaw + _gps_yaw_offset;
-
-					// caclulate the amount the yaw needs to be rotated by
-					float yaw_delta = wrap_pi(measured_yaw - predicted_yaw);
-
-					// save a copy of the quaternion state for later use in calculating the amount of reset change
-					Quatf quat_before_reset = _state.quat_nominal;
-
-					// obtain the yaw angle using the best conditioned from either a Tait-Bryan 321 or 312 sequence
-					// to avoid gimbal lock
-					if (fabsf(_R_to_earth(2, 0)) < fabsf(_R_to_earth(2, 1))) {
-						// get the roll, pitch, yaw estimates from the quaternion states using a 321 Tait-Bryan rotation sequence
-						Quatf q_init(_state.quat_nominal);
-						Eulerf euler_init(q_init);
-
-						// correct the yaw angle
-						euler_init(2) += yaw_delta;
-						euler_init(2) = wrap_pi(euler_init(2));
-
-						// update the quaternions
-						_state.quat_nominal = Quatf(euler_init);
-					} else {
-						// Calculate the 312 Tait-Bryan sequence euler angles that rotate from earth to body frame
-						// PX4 math library does not support this so are using equations from
-						// http://www.atacolorado.com/eulersequences.doc
-						Vector3f euler312;
-						euler312(0) = atan2f(-_R_to_earth(0, 1), _R_to_earth(1, 1));  // first rotation (yaw)
-						euler312(1) = asinf(_R_to_earth(2, 1)); // second rotation (roll)
-						euler312(2) = atan2f(-_R_to_earth(2, 0), _R_to_earth(2, 2));  // third rotation (pitch)
-
-						// correct the yaw angle
-						euler312(0) += yaw_delta;
-						euler312(0) = wrap_pi(euler312(0));
-
-						// Calculate the body to earth frame rotation matrix from the corrected euler angles
-						float c2 = cosf(euler312(2));
-						float s2 = sinf(euler312(2));
-						float s1 = sinf(euler312(1));
-						float c1 = cosf(euler312(1));
-						float s0 = sinf(euler312(0));
-						float c0 = cosf(euler312(0));
-
-						Dcmf R_to_earth;
-						R_to_earth(0, 0) = c0 * c2 - s0 * s1 * s2;
-						R_to_earth(1, 1) = c0 * c1;
-						R_to_earth(2, 2) = c2 * c1;
-						R_to_earth(0, 1) = -c1 * s0;
-						R_to_earth(0, 2) = s2 * c0 + c2 * s1 * s0;
-						R_to_earth(1, 0) = c2 * s0 + s2 * s1 * c0;
-						R_to_earth(1, 2) = s0 * s2 - s1 * c0 * c2;
-						R_to_earth(2, 0) = -s2 * c1;
-						R_to_earth(2, 1) = s1;
-
-						// update the quaternions
-						_state.quat_nominal = Quatf(R_to_earth);
-					}
-
-					// calculate the amount that the quaternion has changed by
-					_state_reset_status.quat_change = quat_before_reset.inversed() * _state.quat_nominal;
-
-					// add the reset amount to the output observer buffered data
-					// Note q1 *= q2 is equivalent to q1 = q2 * q1
-					for (uint8_t i = 0; i < _output_buffer.get_length(); i++) {
-						_output_buffer[i].quat_nominal *= _state_reset_status.quat_change;
-					}
-
-					// apply the change in attitude quaternion to our newest quaternion estimate
-					// which was already taken out from the output buffer
-					_output_new.quat_nominal = _state_reset_status.quat_change * _output_new.quat_nominal;
-
-					// capture the reset event
-					_state_reset_status.quat_counter++;
-
-					// flag the yaw as aligned
-					_control_status.flags.yaw_align = true;
-
-					// turn on fusion of external vision yaw measurements and disable all other yaw fusion
-					_control_status.flags.gps_yaw = true;
-					_control_status.flags.ev_yaw = false;
-					_control_status.flags.mag_hdg = false;
-					_control_status.flags.mag_3D = false;
-					_control_status.flags.mag_dec = false;
-
-					ECL_INFO("EKF commencing GPS yaw fusion");
-					// flag the yaw as aligned
-					_control_status.flags.yaw_align = true;
-				}
+				ECL_INFO("EKF commencing GPS yaw fusion");
+				// flag the yaw as aligned
+				_control_status.flags.yaw_align = true;
 			}
 		}
 
