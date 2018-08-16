@@ -1649,8 +1649,23 @@ void Ekf::fuseGpsAntYaw()
 	float H_YAW[4];
 	float measured_hdg;
 
-	// determine if we can use the data
+	// check if data has been set to NAN indicating no measurement
 	if (isfinite(_gps_sample_delayed.yaw)) {
+		// calculate the observed yaw angle of antenna array, converting a from body to antenna yaw measurement
+		measured_hdg = _gps_sample_delayed.yaw + _gps_yaw_offset;
+
+		// define the predicted antenna array vector and rotate into earth frame
+		Vector3f ant_vec_bf = {cosf(_gps_yaw_offset), sinf(_gps_yaw_offset), 0.0f};
+		Vector3f ant_vec_ef = _R_to_earth * ant_vec_bf;
+
+		// check if antenna array vector is within 30 degrees of vertical and therefore unable to provide a reliable heading
+		if (fabsf(ant_vec_ef(2)) > cosf(math::radians(30.0f)))  {
+			return;
+		}
+
+		// calculate predicted antenna yaw angle
+		predicted_hdg =  atan2f(ant_vec_ef(1),ant_vec_ef(0));
+
 		// calculate observation jacobian
 		float t2 = sin(_gps_yaw_offset);
 		float t3 = cos(_gps_yaw_offset);
@@ -1702,16 +1717,6 @@ void Ekf::fuseGpsAntYaw()
 		H_YAW[1] = -t30*(t26*(t27-q2*t3*2.0f)+t16*t22*t25);
 		H_YAW[2] = t30*(t25*t26-t16*t22*(t27-q2*t3*2.0f));
 		H_YAW[3] = t30*(t26*t32+t16*t22*t35);
-
-		// calculate the observed yaw angle of antenna array
-		// convert yaw back to original antenna measurement
-		measured_hdg = _gps_sample_delayed.yaw + _gps_yaw_offset;
-
-		// define the predicted antenna array vector, rotate into earth frame
-		// and calculate predicted antenna yaw angle
-		Vector3f ant_vec_bf = {cosf(_gps_yaw_offset), sinf(_gps_yaw_offset), 0.0f};
-		Vector3f ant_vec_ef = _R_to_earth * ant_vec_bf;
-		predicted_hdg =  atan2f(ant_vec_ef(1),ant_vec_ef(0));
 
 		// using magnetic heading tuning parameter
 		R_YAW = sq(fmaxf(_params.mag_heading_noise, 1.0e-2f));
@@ -1878,12 +1883,18 @@ void Ekf::fuseGpsAntYaw()
 
 bool Ekf::resetGpsAntYaw()
 {
+	// check if data has been set to NAN indicating no measurement
 	if (isfinite(_gps_sample_delayed.yaw)) {
 
-		// define the predicted antenna array vector, rotate into earth frame
-		// and calculate predicted antenna yaw angle
+		// define the predicted antenna array vector and rotate into earth frame
 		Vector3f ant_vec_bf = {cosf(_gps_yaw_offset), sinf(_gps_yaw_offset), 0.0f};
 		Vector3f ant_vec_ef = _R_to_earth * ant_vec_bf;
+
+		// check if antenna array vector is within 30 degrees of vertical and therefore unable to provide a reliable heading
+		if (fabsf(ant_vec_ef(2)) > cosf(math::radians(30.0f)))  {
+			return false;
+		}
+
 		float predicted_yaw =  atan2f(ant_vec_ef(1),ant_vec_ef(0));
 
 		// get measurement and correct for antenna array yaw offset
