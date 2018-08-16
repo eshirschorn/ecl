@@ -516,9 +516,6 @@ void Ekf::controlGpsFusion()
 			// don't start using GPS data unless data is arriving frequently
 			if (_time_last_imu - _time_last_gps < 2 * GPS_MAX_INTERVAL) {
 				// reset the yaw angle to the value from the observaton quaternion
-				// get the roll, pitch, yaw estimates from the quaternion states
-				Quatf q_init(_state.quat_nominal);
-				Eulerf euler_init(q_init);
 
 				// get initial yaw from the observation quaternion
 				const gpsSample &gps_newest = _gps_buffer.get_newest();
@@ -539,12 +536,54 @@ void Ekf::controlGpsFusion()
 					// save a copy of the quaternion state for later use in calculating the amount of reset change
 					Quatf quat_before_reset = _state.quat_nominal;
 
-					// correct the yaw angle
-					euler_init(2) += yaw_delta;
-					euler_init(2) = wrap_pi(euler_init(2));
+					// obtain the yaw angle using the best conditioned from either a Tait-Bryan 321 or 312 sequence
+					// to avoid gimbal lock
+					if (fabsf(_R_to_earth(2, 0)) < fabsf(_R_to_earth(2, 1))) {
+						// get the roll, pitch, yaw estimates from the quaternion states using a 321 Tait-Bryan rotation sequence
+						Quatf q_init(_state.quat_nominal);
+						Eulerf euler_init(q_init);
 
-					// calculate initial quaternion states for the ekf
-					_state.quat_nominal = Quatf(euler_init);
+						// correct the yaw angle
+						euler_init(2) += yaw_delta;
+						euler_init(2) = wrap_pi(euler_init(2));
+
+						// update the quaternions
+						_state.quat_nominal = Quatf(euler_init);
+					} else {
+						// Calculate the 312 Tait-Bryan sequence euler angles that rotate from earth to body frame
+						// PX4 math library does not support this so are using equations from
+						// http://www.atacolorado.com/eulersequences.doc
+						Vector3f euler312;
+						euler312(0) = atan2f(-_R_to_earth(0, 1), _R_to_earth(1, 1));  // first rotation (yaw)
+						euler312(1) = asinf(_R_to_earth(2, 1)); // second rotation (roll)
+						euler312(2) = atan2f(-_R_to_earth(2, 0), _R_to_earth(2, 2));  // third rotation (pitch)
+
+						// correct the yaw angle
+						euler312(0) += yaw_delta;
+						euler312(0) = wrap_pi(euler312(0));
+
+						// Calculate the body to earth frame rotation matrix from the corrected euler angles
+						float c2 = cosf(euler312(2));
+						float s2 = sinf(euler312(2));
+						float s1 = sinf(euler312(1));
+						float c1 = cosf(euler312(1));
+						float s0 = sinf(euler312(0));
+						float c0 = cosf(euler312(0));
+
+						Dcmf R_to_earth;
+						R_to_earth(0, 0) = c0 * c2 - s0 * s1 * s2;
+						R_to_earth(1, 1) = c0 * c1;
+						R_to_earth(2, 2) = c2 * c1;
+						R_to_earth(0, 1) = -c1 * s0;
+						R_to_earth(0, 2) = s2 * c0 + c2 * s1 * s0;
+						R_to_earth(1, 0) = c2 * s0 + s2 * s1 * c0;
+						R_to_earth(1, 2) = s0 * s2 - s1 * c0 * c2;
+						R_to_earth(2, 0) = -s2 * c1;
+						R_to_earth(2, 1) = s1;
+
+						// update the quaternions
+						_state.quat_nominal = Quatf(R_to_earth);
+					}
 
 					// calculate the amount that the quaternion has changed by
 					_state_reset_status.quat_change = quat_before_reset.inversed() * _state.quat_nominal;
