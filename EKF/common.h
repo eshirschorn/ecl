@@ -186,7 +186,7 @@ struct auxVelSample {
 #define MASK_USE_EVYAW  (1<<4)		///< set to true to use exernal vision quaternion data for yaw
 #define MASK_USE_DRAG  (1<<5)		///< set to true to use the multi-rotor drag model to estimate wind
 #define MASK_ROTATE_EV  (1<<6)		///< set to true to if the EV observations are in a non NED reference frame and need to be rotated before being used
-#define MASK_USE_GPSYAW  (1<<7)		///< set to true to use exernal vision quaternion data for yaw
+#define MASK_USE_GPSYAW  (1<<7)		///< set to true to use GPS yaw data if available
 
 // Integer definitions for mag_fusion_type
 #define MAG_FUSE_TYPE_AUTO      0	///< The selection of either heading or 3D magnetometer fusion will be automatic
@@ -194,7 +194,7 @@ struct auxVelSample {
 #define MAG_FUSE_TYPE_3D        2	///< Magnetometer 3-axis fusion will always be used. This is more accurate, but more affected by localised earth field distortions
 #define MAG_FUSE_TYPE_AUTOFW    3	///< The same as option 0, but if fusing airspeed, magnetometer fusion is only allowed to modify the magnetic field states.
 #define MAG_FUSE_TYPE_INDOOR    4	///< The same as option 0, but magnetomer or yaw fusion will not be used unless earth frame external aiding (GPS or External Vision) is being used. This prevents inconsistent magnetic fields associated with indoor operation degrading state estimates.
-#define MAG_FUSE_TYPE_NONE	5	///< Do not use magnetomer under any circumstance. GPS yaw will be used if available.
+#define MAG_FUSE_TYPE_NONE	5	///< Do not use magnetomer under any circumstance. Other sources of yaw may be used if selected via the EKF2_AID_MASK parameter.
 
 // Maximum sensor intervals in usec
 #define GPS_MAX_INTERVAL  (uint64_t)5e5	///< Maximum allowable time interval between GPS measurements (uSec)
